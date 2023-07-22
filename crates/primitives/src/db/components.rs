@@ -22,10 +22,11 @@ pub enum DatabaseComponentError<SE, BHE> {
     BlockHash(BHE),
 }
 
+#[async_trait::async_trait(?Send)]
 impl<S: State, BH: BlockHash> Database for DatabaseComponents<S, BH> {
     type Error = DatabaseComponentError<S::Error, BH::Error>;
 
-    fn basic(&mut self, address: B160) -> Result<Option<AccountInfo>, Self::Error> {
+    async fn basic(&mut self, address: B160) -> Result<Option<AccountInfo>, Self::Error> {
         self.state.basic(address).map_err(Self::Error::State)
     }
 

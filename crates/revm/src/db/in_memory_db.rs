@@ -159,10 +159,11 @@ impl<ExtDB: DatabaseRef> DatabaseCommit for CacheDB<ExtDB> {
     }
 }
 
+#[async_trait::async_trait(?Send)]
 impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
     type Error = ExtDB::Error;
 
-    fn basic(&mut self, address: B160) -> Result<Option<AccountInfo>, Self::Error> {
+    async fn basic(&mut self, address: B160) -> Result<Option<AccountInfo>, Self::Error> {
         let basic = match self.accounts.entry(address) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => entry.insert(
@@ -393,10 +394,11 @@ impl BenchmarkDB {
     }
 }
 
+#[async_trait::async_trait(?Send)]
 impl Database for BenchmarkDB {
     type Error = Infallible;
     /// Get basic account information.
-    fn basic(&mut self, address: B160) -> Result<Option<AccountInfo>, Self::Error> {
+    async fn basic(&mut self, address: B160) -> Result<Option<AccountInfo>, Self::Error> {
         if address == B160::zero() {
             return Ok(Some(AccountInfo {
                 nonce: 1,
@@ -437,8 +439,8 @@ mod tests {
     use super::{CacheDB, EmptyDB};
     use crate::primitives::{db::Database, AccountInfo, U256};
 
-    #[test]
-    pub fn test_insert_account_storage() {
+    #[tokio::test]
+    pub async fn test_insert_account_storage() {
         let account = 42.into();
         let nonce = 42;
         let mut init_state = CacheDB::new(EmptyDB::default());
@@ -454,12 +456,12 @@ mod tests {
         let mut new_state = CacheDB::new(init_state);
         let _ = new_state.insert_account_storage(account, key, value);
 
-        assert_eq!(new_state.basic(account).unwrap().unwrap().nonce, nonce);
+        assert_eq!(new_state.basic(account).await.unwrap().unwrap().nonce, nonce);
         assert_eq!(new_state.storage(account, key), Ok(value));
     }
 
-    #[test]
-    pub fn test_replace_account_storage() {
+    #[tokio::test]
+    pub async fn test_replace_account_storage() {
         let account = 42.into();
         let nonce = 42;
         let mut init_state = CacheDB::new(EmptyDB::default());
@@ -478,7 +480,7 @@ mod tests {
         let mut new_state = CacheDB::new(init_state);
         let _ = new_state.replace_account_storage(account, [(key1, value1)].into());
 
-        assert_eq!(new_state.basic(account).unwrap().unwrap().nonce, nonce);
+        assert_eq!(new_state.basic(account).await.unwrap().unwrap().nonce, nonce);
         assert_eq!(new_state.storage(account, key0), Ok(U256::ZERO));
         assert_eq!(new_state.storage(account, key1), Ok(value1));
     }

@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
     let mut ethersdb = EthersDB::new(Arc::clone(&client), None).unwrap();
 
     // query basic properties of an account incl bytecode
-    let acc_info = ethersdb.basic(pool_address).unwrap().unwrap();
+    let acc_info = ethersdb.basic(pool_address).await.unwrap().unwrap();
 
     // query value of storage slot at account address
     let value = ethersdb.storage(pool_address, slot).unwrap();
@@ -83,7 +83,7 @@ async fn main() -> Result<()> {
     evm.env.tx.value = rU256::try_from(0)?;
 
     // execute transaction without writing to the DB
-    let ref_tx = evm.transact_ref().unwrap();
+    let ref_tx = evm.transact_ref().await.unwrap();
     // select ExecutionResult struct
     let result = ref_tx.result;
 

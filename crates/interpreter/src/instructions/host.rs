@@ -10,9 +10,9 @@ use crate::{
 };
 use core::cmp::min;
 
-pub fn balance<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
+pub async fn balance<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
     pop_address!(interpreter, address);
-    let ret = host.balance(address);
+    let ret = host.balance(address).await;
     if ret.is_none() {
         interpreter.instruction_result = InstructionResult::FatalExternalError;
         return;
@@ -32,11 +32,11 @@ pub fn balance<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
     push!(interpreter, balance);
 }
 
-pub fn selfbalance<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
+pub async fn selfbalance<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
     // EIP-1884: Repricing for trie-size-dependent opcodes
     check!(interpreter, SPEC::enabled(ISTANBUL));
     gas!(interpreter, gas::LOW);
-    let ret = host.balance(interpreter.contract.address);
+    let ret = host.balance(interpreter.contract.address).await;
     if ret.is_none() {
         interpreter.instruction_result = InstructionResult::FatalExternalError;
         return;
@@ -45,9 +45,9 @@ pub fn selfbalance<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Hos
     push!(interpreter, balance);
 }
 
-pub fn extcodesize<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
+pub async fn extcodesize<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
     pop_address!(interpreter, address);
-    let ret = host.code(address);
+    let ret = host.code(address).await;
     if ret.is_none() {
         interpreter.instruction_result = InstructionResult::FatalExternalError;
         return;
@@ -71,10 +71,10 @@ pub fn extcodesize<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Hos
     push!(interpreter, U256::from(code.len()));
 }
 
-pub fn extcodehash<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
+pub async fn extcodehash<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
     check!(interpreter, SPEC::enabled(CONSTANTINOPLE)); // EIP-1052: EXTCODEHASH opcode
     pop_address!(interpreter, address);
-    let ret = host.code_hash(address);
+    let ret = host.code_hash(address).await;
     if ret.is_none() {
         interpreter.instruction_result = InstructionResult::FatalExternalError;
         return;
@@ -97,11 +97,11 @@ pub fn extcodehash<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Hos
     push_b256!(interpreter, code_hash);
 }
 
-pub fn extcodecopy<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
+pub async fn extcodecopy<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
     pop_address!(interpreter, address);
     pop!(interpreter, memory_offset, code_offset, len_u256);
 
-    let ret = host.code(address);
+    let ret = host.code(address).await;
     if ret.is_none() {
         interpreter.instruction_result = InstructionResult::FatalExternalError;
         return;
@@ -130,7 +130,7 @@ pub fn extcodecopy<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Hos
         .set_data(memory_offset, code_offset, len, code.bytes());
 }
 
-pub fn blockhash(interpreter: &mut Interpreter, host: &mut dyn Host) {
+pub async fn blockhash(interpreter: &mut Interpreter, host: &mut dyn Host) {
     gas!(interpreter, gas::BLOCKHASH);
     pop_top!(interpreter, number);
 
@@ -138,7 +138,7 @@ pub fn blockhash(interpreter: &mut Interpreter, host: &mut dyn Host) {
         let diff = as_usize_saturated!(diff);
         // blockhash should push zero if number is same as current block number.
         if diff <= 256 && diff != 0 {
-            let ret = host.block_hash(*number);
+            let ret = host.block_hash(*number).await;
             if ret.is_none() {
                 interpreter.instruction_result = InstructionResult::FatalExternalError;
                 return;
@@ -210,11 +210,13 @@ pub fn log<const N: u8>(interpreter: &mut Interpreter, host: &mut dyn Host) {
     host.log(interpreter.contract.address, topics, data);
 }
 
-pub fn selfdestruct<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
+pub async fn selfdestruct<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
     check_staticcall!(interpreter);
     pop_address!(interpreter, target);
 
-    let res = host.selfdestruct(interpreter.contract.address, target);
+    let res = host
+        .selfdestruct(interpreter.contract.address, target)
+        .await;
     if res.is_none() {
         interpreter.instruction_result = InstructionResult::FatalExternalError;
         return;
@@ -292,7 +294,7 @@ pub fn prepare_create_inputs<const IS_CREATE2: bool, SPEC: Spec>(
     }));
 }
 
-pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
+pub async fn create<const IS_CREATE2: bool, SPEC: Spec>(
     interpreter: &mut Interpreter,
     host: &mut dyn Host,
 ) {
@@ -303,7 +305,7 @@ pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
         return;
     };
 
-    let (return_reason, address, gas, return_data) = host.create(&mut create_input);
+    let (return_reason, address, gas, return_data) = host.create(&mut create_input).await;
 
     interpreter.return_data_buffer = match return_reason {
         // Save data to return data buffer if the create reverted
@@ -335,23 +337,23 @@ pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
     }
 }
 
-pub fn call<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
-    call_inner::<SPEC>(interpreter, CallScheme::Call, host);
+pub async fn call<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
+    call_inner::<SPEC>(interpreter, CallScheme::Call, host).await;
 }
 
-pub fn call_code<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
-    call_inner::<SPEC>(interpreter, CallScheme::CallCode, host);
+pub async fn call_code<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
+    call_inner::<SPEC>(interpreter, CallScheme::CallCode, host).await;
 }
 
-pub fn delegate_call<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
-    call_inner::<SPEC>(interpreter, CallScheme::DelegateCall, host);
+pub async fn delegate_call<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
+    call_inner::<SPEC>(interpreter, CallScheme::DelegateCall, host).await;
 }
 
-pub fn static_call<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
-    call_inner::<SPEC>(interpreter, CallScheme::StaticCall, host);
+pub async fn static_call<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
+    call_inner::<SPEC>(interpreter, CallScheme::StaticCall, host).await;
 }
 
-fn prepare_call_inputs<SPEC: Spec>(
+async fn prepare_call_inputs<SPEC: Spec>(
     interpreter: &mut Interpreter,
     scheme: CallScheme,
     host: &mut dyn Host,
@@ -450,7 +452,7 @@ fn prepare_call_inputs<SPEC: Spec>(
     };
 
     // load account and calculate gas cost.
-    let res = host.load_account(to);
+    let res = host.load_account(to).await;
     if res.is_none() {
         interpreter.instruction_result = InstructionResult::FatalExternalError;
         return;
@@ -496,7 +498,7 @@ fn prepare_call_inputs<SPEC: Spec>(
     }));
 }
 
-pub fn call_inner<SPEC: Spec>(
+pub async fn call_inner<SPEC: Spec>(
     interpreter: &mut Interpreter,
     scheme: CallScheme,
     host: &mut dyn Host,
@@ -518,14 +520,15 @@ pub fn call_inner<SPEC: Spec>(
         &mut out_len,
         &mut out_offset,
         &mut call_input,
-    );
+    )
+    .await;
 
     let Some(mut call_input) = call_input else {
         return;
     };
 
     // Call host to interact with target contract
-    let (reason, gas, return_data) = host.call(&mut call_input);
+    let (reason, gas, return_data) = host.call(&mut call_input).await;
 
     interpreter.return_data_buffer = return_data;
 
