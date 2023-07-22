@@ -59,11 +59,12 @@ struct CallResult {
     return_value: Bytes,
 }
 
+#[async_trait::async_trait(?Send)]
 pub trait Transact<DBError> {
     /// Do transaction.
     /// InstructionResult InstructionResult, Output for call or Address if we are creating
     /// contract, gas spend, gas refunded, State that needs to be applied.
-    fn transact(&mut self) -> EVMResult<DBError>;
+    async fn transact(&mut self) -> EVMResult<DBError>;
 }
 
 impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, INSPECT> {
@@ -71,21 +72,23 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
     ///
     /// Loading of accounts/storages is needed to make them hot.
     #[inline]
-    fn load_access_list(&mut self) -> Result<(), EVMError<DB::Error>> {
+    async fn load_access_list(&mut self) -> Result<(), EVMError<DB::Error>> {
         for (address, slots) in self.data.env.tx.access_list.iter() {
             self.data
                 .journaled_state
                 .initial_account_load(*address, slots, self.data.db)
+                .await
                 .map_err(EVMError::Database)?;
         }
         Ok(())
     }
 }
 
+#[async_trait::async_trait(?Send)]
 impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> Transact<DB::Error>
     for EVMImpl<'a, GSPEC, DB, INSPECT>
 {
-    fn transact(&mut self) -> EVMResult<DB::Error> {
+    async fn transact(&mut self) -> EVMResult<DB::Error> {
         self.env().validate_block_env::<GSPEC, DB::Error>()?;
         self.env().validate_tx::<GSPEC>()?;
 
@@ -111,14 +114,16 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> Transact<DB::Error>
             self.data
                 .journaled_state
                 .initial_account_load(self.data.env.block.coinbase, &[], self.data.db)
+                .await
                 .map_err(EVMError::Database)?;
         }
-        self.load_access_list()?;
+        self.load_access_list().await?;
 
         // load acc
         let journal = &mut self.data.journaled_state;
         let (caller_account, _) = journal
             .load_account(tx_caller, self.data.db)
+            .await
             .map_err(EVMError::Database)?;
 
         self.data.env.validate_tx_agains_state(caller_account)?;
@@ -143,34 +148,38 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> Transact<DB::Error>
                 caller_account.info.nonce =
                     caller_account.info.nonce.checked_add(1).unwrap_or(u64::MAX);
 
-                let (exit, gas, bytes) = self.call(&mut CallInputs {
-                    contract: address,
-                    transfer: Transfer {
-                        source: tx_caller,
-                        target: address,
-                        value: tx_value,
-                    },
-                    input: tx_data,
-                    gas_limit: transact_gas_limit,
-                    context: CallContext {
-                        caller: tx_caller,
-                        address,
-                        code_address: address,
-                        apparent_value: tx_value,
-                        scheme: CallScheme::Call,
-                    },
-                    is_static: false,
-                });
+                let (exit, gas, bytes) = self
+                    .call(&mut CallInputs {
+                        contract: address,
+                        transfer: Transfer {
+                            source: tx_caller,
+                            target: address,
+                            value: tx_value,
+                        },
+                        input: tx_data,
+                        gas_limit: transact_gas_limit,
+                        context: CallContext {
+                            caller: tx_caller,
+                            address,
+                            code_address: address,
+                            apparent_value: tx_value,
+                            scheme: CallScheme::Call,
+                        },
+                        is_static: false,
+                    })
+                    .await;
                 (exit, gas, Output::Call(bytes))
             }
             TransactTo::Create(scheme) => {
-                let (exit, address, ret_gas, bytes) = self.create(&mut CreateInputs {
-                    caller: tx_caller,
-                    scheme,
-                    value: tx_value,
-                    init_code: tx_data,
-                    gas_limit: transact_gas_limit,
-                });
+                let (exit, address, ret_gas, bytes) = self
+                    .create(&mut CreateInputs {
+                        caller: tx_caller,
+                        scheme,
+                        value: tx_value,
+                        init_code: tx_data,
+                        gas_limit: transact_gas_limit,
+                    })
+                    .await;
                 (exit, ret_gas, Output::Create(bytes, address))
             }
         };
@@ -193,7 +202,7 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> Transact<DB::Error>
             }
         }
 
-        let (state, logs, gas_used, gas_refunded) = self.finalize::<GSPEC>(&gas);
+        let (state, logs, gas_used, gas_refunded) = self.finalize::<GSPEC>(&gas).await;
 
         let result = match exit_reason.into() {
             SuccessOrHalt::Success(reason) => ExecutionResult::Success {
@@ -248,7 +257,10 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
         }
     }
 
-    fn finalize<SPEC: Spec>(&mut self, gas: &Gas) -> (HashMap<B160, Account>, Vec<Log>, u64, u64) {
+    async fn finalize<SPEC: Spec>(
+        &mut self,
+        gas: &Gas,
+    ) -> (HashMap<B160, Account>, Vec<Log>, u64, u64) {
         let caller = self.data.env.tx.caller;
         let coinbase = self.data.env.block.coinbase;
         let (gas_used, gas_refunded) = if crate::USE_GAS {
@@ -281,7 +293,7 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
             let Ok((coinbase_account, _)) = self
                 .data
                 .journaled_state
-                .load_account(coinbase, self.data.db)
+                .load_account(coinbase, self.data.db).await
             else {
                 panic!("coinbase account not found");
             };
@@ -305,7 +317,10 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
         (new_state, logs, gas_used, gas_refunded)
     }
 
-    fn prepare_create(&mut self, inputs: &CreateInputs) -> Result<PreparedCreate, CreateResult> {
+    async fn prepare_create(
+        &mut self,
+        inputs: &CreateInputs,
+    ) -> Result<PreparedCreate, CreateResult> {
         let gas = Gas::new(inputs.gas_limit);
 
         // Check depth of calls
@@ -319,7 +334,7 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
         }
 
         // Fetch balance of caller.
-        let Some((caller_balance, _)) = self.balance(inputs.caller) else {
+        let Some((caller_balance, _)) = self.balance(inputs.caller).await else {
             return Err(CreateResult {
                 result: InstructionResult::FatalExternalError,
                 created_address: None,
@@ -363,6 +378,7 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
             .data
             .journaled_state
             .load_account(created_address, self.data.db)
+            .await
             .map_err(|e| self.data.error = Some(e))
             .is_err()
         {
@@ -408,8 +424,8 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
     }
 
     /// EVM create opcode for both initial crate and CREATE and CREATE2 opcodes.
-    fn create_inner(&mut self, inputs: &CreateInputs) -> CreateResult {
-        let res = self.prepare_create(inputs);
+    async fn create_inner(&mut self, inputs: &CreateInputs) -> CreateResult {
+        let res = self.prepare_create(inputs).await;
 
         let prepared_create = match res {
             Ok(o) => o,
@@ -417,8 +433,9 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
         };
 
         // Create new interpreter and execute initcode
-        let (exit_reason, mut interpreter) =
-            self.run_interpreter(prepared_create.contract, prepared_create.gas.limit(), false);
+        let (exit_reason, mut interpreter) = self
+            .run_interpreter(prepared_create.contract, prepared_create.gas.limit(), false)
+            .await;
 
         // Host error if present on execution
         match exit_reason {
@@ -516,7 +533,7 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
 
     /// Create a Interpreter and run it.
     /// Returns the exit reason and created interpreter as it contains return values and gas spend.
-    pub fn run_interpreter(
+    pub async fn run_interpreter(
         &mut self,
         contract: Box<Contract>,
         gas_limit: u64,
@@ -539,9 +556,9 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
                 .initialize_interp(&mut interpreter, &mut self.data);
         }
         let exit_reason = if INSPECT {
-            interpreter.run_inspect::<Self, GSPEC>(self)
+            interpreter.run_inspect::<Self, GSPEC>(self).await
         } else {
-            interpreter.run::<Self, GSPEC>(self)
+            interpreter.run::<Self, GSPEC>(self).await
         };
 
         (exit_reason, interpreter)
@@ -591,10 +608,10 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
         }
     }
 
-    fn prepare_call(&mut self, inputs: &mut CallInputs) -> Result<PreparedCall, CallResult> {
+    async fn prepare_call(&mut self, inputs: &mut CallInputs) -> Result<PreparedCall, CallResult> {
         let gas = Gas::new(inputs.gas_limit);
         // Load account and get code. Account is now hot.
-        let Some((bytecode, _)) = self.code(inputs.contract) else {
+        let Some((bytecode, _)) = self.code(inputs.contract).await else {
             return Err(CallResult {
                 result: InstructionResult::FatalExternalError,
                 gas,
@@ -616,17 +633,22 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
 
         // Touch address. For "EIP-158 State Clear", this will erase empty accounts.
         if inputs.transfer.value == U256::ZERO {
-            self.load_account(inputs.context.address);
+            self.load_account(inputs.context.address).await;
             self.data.journaled_state.touch(&inputs.context.address);
         }
 
         // Transfer value from caller to called account
-        if let Err(e) = self.data.journaled_state.transfer(
-            &inputs.transfer.source,
-            &inputs.transfer.target,
-            inputs.transfer.value,
-            self.data.db,
-        ) {
+        if let Err(e) = self
+            .data
+            .journaled_state
+            .transfer(
+                &inputs.transfer.source,
+                &inputs.transfer.target,
+                inputs.transfer.value,
+                self.data.db,
+            )
+            .await
+        {
             self.data.journaled_state.checkpoint_revert(checkpoint);
             return Err(CallResult {
                 result: e,
@@ -649,8 +671,8 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
     }
 
     /// Main contract call of the EVM.
-    fn call_inner(&mut self, inputs: &mut CallInputs) -> CallResult {
-        let res = self.prepare_call(inputs);
+    async fn call_inner(&mut self, inputs: &mut CallInputs) -> CallResult {
+        let res = self.prepare_call(inputs).await;
 
         let prepared_call = match res {
             Ok(o) => o,
@@ -661,11 +683,13 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
             self.call_precompile(inputs, prepared_call.gas)
         } else if !prepared_call.contract.bytecode.is_empty() {
             // Create interpreter and execute subcall
-            let (exit_reason, interpreter) = self.run_interpreter(
-                prepared_call.contract,
-                prepared_call.gas.limit(),
-                inputs.is_static,
-            );
+            let (exit_reason, interpreter) = self
+                .run_interpreter(
+                    prepared_call.contract,
+                    prepared_call.gas.limit(),
+                    inputs.is_static,
+                )
+                .await;
             CallResult {
                 result: exit_reason,
                 gas: interpreter.gas,
@@ -692,6 +716,7 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
     }
 }
 
+#[async_trait::async_trait(?Send)]
 impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
     for EVMImpl<'a, GSPEC, DB, INSPECT>
 {
@@ -707,7 +732,7 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
         self.data.env
     }
 
-    fn block_hash(&mut self, number: U256) -> Option<B256> {
+    async fn block_hash(&mut self, number: U256) -> Option<B256> {
         self.data
             .db
             .block_hash(number)
@@ -715,45 +740,49 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
             .ok()
     }
 
-    fn load_account(&mut self, address: B160) -> Option<(bool, bool)> {
+    async fn load_account(&mut self, address: B160) -> Option<(bool, bool)> {
         self.data
             .journaled_state
             .load_account_exist(address, self.data.db)
+            .await
             .map_err(|e| self.data.error = Some(e))
             .ok()
     }
 
-    fn balance(&mut self, address: B160) -> Option<(U256, bool)> {
+    async fn balance(&mut self, address: B160) -> Option<(U256, bool)> {
         let db = &mut self.data.db;
         let journal = &mut self.data.journaled_state;
         let error = &mut self.data.error;
         journal
             .load_account(address, db)
+            .await
             .map_err(|e| *error = Some(e))
             .ok()
             .map(|(acc, is_cold)| (acc.info.balance, is_cold))
     }
 
-    fn code(&mut self, address: B160) -> Option<(Bytecode, bool)> {
+    async fn code(&mut self, address: B160) -> Option<(Bytecode, bool)> {
         let journal = &mut self.data.journaled_state;
         let db = &mut self.data.db;
         let error = &mut self.data.error;
 
         let (acc, is_cold) = journal
             .load_code(address, db)
+            .await
             .map_err(|e| *error = Some(e))
             .ok()?;
         Some((acc.info.code.clone().unwrap(), is_cold))
     }
 
     /// Get code hash of address.
-    fn code_hash(&mut self, address: B160) -> Option<(B256, bool)> {
+    async fn code_hash(&mut self, address: B160) -> Option<(B256, bool)> {
         let journal = &mut self.data.journaled_state;
         let db = &mut self.data.db;
         let error = &mut self.data.error;
 
         let (acc, is_cold) = journal
             .load_code(address, db)
+            .await
             .map_err(|e| *error = Some(e))
             .ok()?;
 
@@ -798,18 +827,19 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
         self.data.journaled_state.log(log);
     }
 
-    fn selfdestruct(&mut self, address: B160, target: B160) -> Option<SelfDestructResult> {
+    async fn selfdestruct(&mut self, address: B160, target: B160) -> Option<SelfDestructResult> {
         if INSPECT {
             self.inspector.selfdestruct(address, target);
         }
         self.data
             .journaled_state
             .selfdestruct(address, target, self.data.db)
+            .await
             .map_err(|e| self.data.error = Some(e))
             .ok()
     }
 
-    fn create(
+    async fn create(
         &mut self,
         inputs: &mut CreateInputs,
     ) -> (InstructionResult, Option<B160>, Gas, Bytes) {
@@ -820,7 +850,7 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 return (ret, address, gas, out);
             }
         }
-        let ret = self.create_inner(inputs);
+        let ret = self.create_inner(inputs).await;
         if INSPECT {
             self.inspector.create_end(
                 &mut self.data,
@@ -835,14 +865,14 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
         }
     }
 
-    fn call(&mut self, inputs: &mut CallInputs) -> (InstructionResult, Gas, Bytes) {
+    async fn call(&mut self, inputs: &mut CallInputs) -> (InstructionResult, Gas, Bytes) {
         if INSPECT {
             let (ret, gas, out) = self.inspector.call(&mut self.data, inputs);
             if ret != InstructionResult::Continue {
                 return (ret, gas, out);
             }
         }
-        let ret = self.call_inner(inputs);
+        let ret = self.call_inner(inputs).await;
         if INSPECT {
             self.inspector.call_end(
                 &mut self.data,

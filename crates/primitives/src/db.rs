@@ -11,11 +11,12 @@ pub use components::{
     BlockHash, BlockHashRef, DatabaseComponentError, DatabaseComponents, State, StateRef,
 };
 
+#[async_trait::async_trait(?Send)]
 #[auto_impl(& mut, Box)]
 pub trait Database {
     type Error;
     /// Get basic account information.
-    fn basic(&mut self, address: B160) -> Result<Option<AccountInfo>, Self::Error>;
+    async fn basic(&mut self, address: B160) -> Result<Option<AccountInfo>, Self::Error>;
     /// Get account code by its hash
     fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error>;
     /// Get storage value of address at index.
@@ -56,10 +57,12 @@ impl<'a, Error> RefDBWrapper<'a, Error> {
     }
 }
 
+#[async_trait::async_trait(?Send)]
 impl<'a, Error> Database for RefDBWrapper<'a, Error> {
     type Error = Error;
+
     /// Get basic account information.
-    fn basic(&mut self, address: B160) -> Result<Option<AccountInfo>, Self::Error> {
+    async fn basic(&mut self, address: B160) -> Result<Option<AccountInfo>, Self::Error> {
         self.db.basic(address)
     }
     /// Get account code by its hash
